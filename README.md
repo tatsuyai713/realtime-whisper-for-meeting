@@ -100,36 +100,109 @@ APIキーは画面に入力するか、起動前に `OPENAI_API_KEY` 環境変�
 ## 別PCで日本語翻訳を実行する
 
 文字起こしはMac側で実行し、日本語翻訳だけをLAN内の別マシン上のOllamaへ
-任せることができます。翻訳サーバー側にはPython 3.10以上とOllamaが必要です。
+任せることができます。推奨サーバーはUbuntuとAMD Radeon AI PRO R9700です。
+翻訳サーバーは既定でGPU必須となり、ROCmまたはOllamaがCPUへフォールバックしている
+場合は起動しません。
 
-### 翻訳サーバー側（Windows PowerShell）
+### Ubuntu + Radeon AI PRO R9700（推奨）
 
-このプロジェクトを翻訳用マシンへコピーし、プロジェクトのフォルダで実行します。
+R9700はRDNA4の`gfx1201`としてROCmとOllamaのLinux版で正式対応されています。
+ROCmの対応OSを厳密に合わせる必要があるため、Ubuntu 24.04.4または22.04.5を
+使用してください。以下はUbuntu 24.04系、ROCm 7.2.4を例にしています。バージョンを
+変更する場合は[AMDの対応表](https://rocm.docs.amd.com/projects/install-on-linux/en/docs-7.2.3/reference/system-requirements.html)と
+[ROCm Quick Start](https://rocm.docs.amd.com/projects/install-on-linux/en/docs-7.2.4/install/quick-start.html)を確認してください。
 
-```powershell
-py -3.12 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install -e . --no-deps
+#### 1. ROCmドライバーをインストール
+
+```bash
+sudo apt update
+wget https://repo.radeon.com/amdgpu-install/7.2.4/ubuntu/noble/amdgpu-install_7.2.4.70204-1_all.deb
+sudo apt install ./amdgpu-install_7.2.4.70204-1_all.deb
+sudo apt update
+sudo apt install "linux-headers-$(uname -r)" "linux-modules-extra-$(uname -r)"
+sudo apt install amdgpu-dkms rocm
+sudo usermod -aG render,video "$USER"
+sudo reboot
+```
+
+再起動後、R9700と`gfx1201`が表示されることを確認します。
+
+```bash
+rocminfo | grep -E "Marketing Name|gfx1201"
+ls -l /dev/kfd /dev/dri/renderD*
+```
+
+#### 2. Ollamaをインストール
+
+[OllamaのLinux手順](https://github.com/ollama/ollama/blob/main/docs/linux.mdx)に従い、
+最新版とAMD ROCmランタイムをインストールします。
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+curl -fsSL https://ollama.com/download/ollama-linux-amd64-rocm.tar.zst \
+  | sudo tar x -C /usr
+sudo usermod -aG render,video ollama
+sudo systemctl restart ollama
 ollama pull translategemma:12b
-python run_translation_server.py --host 0.0.0.0 --port 8765
 ```
 
-`--host` は翻訳サーバーが待ち受けるIP、`--port` は待受ポートです。Ollamaが
-標準以外の場所で動作している場合は、例えば次のように指定できます。
+簡単な推論を一度実行し、`PROCESSOR`が`100% GPU`またはGPUを含む表示になることを
+確認します。CPUだけが表示された状態では本プロジェクトのサーバーは起動しません。
 
-```powershell
-python run_translation_server.py --host 192.168.1.50 --port 9000 `
-  --ollama-host 127.0.0.1 --ollama-port 11434
+```bash
+ollama run translategemma:12b "Translate Hello into Japanese."
+ollama ps
 ```
 
-Windows Defenderファイアウォールで、選択したTCPポートへの受信をプライベート
-ネットワークから許可してください。認証や暗号化は行わないため、インターネットへ
-直接公開せず、信頼できるLAN内だけで使用してください。
+OllamaはR9700を`gfx1201`として正式サポートしており、LinuxではROCm v7ドライバーが
+必要です。[Ollama AMD GPU対応表](https://github.com/ollama/ollama/blob/main/docs/gpu.mdx)
+古いROCm 6系ドライバーではGPU検出がタイムアウトしてCPUへフォールバックするため、
+`HSA_OVERRIDE_GFX_VERSION`で回避せずROCm v7へ更新してください。
 
-インストール後は次のコマンドでも起動できます。
+#### 3. 翻訳サーバーを起動
+
+```bash
+git clone git@github.com:tatsuyai713/realtime-whisper-for-mac.git
+cd realtime-whisper-for-mac
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e . --no-deps
+python run_translation_server.py --check-gpu
+python run_translation_server.py \
+  --host 0.0.0.0 \
+  --port 8765 \
+  --model translategemma:12b
+```
+
+`--check-gpu`は`rocminfo`、`gfx1201`、`/dev/kfd`のアクセス権を検査します。通常起動時は
+さらに指定モデルをOllamaへロードし、`/api/ps`の`size_vram`が0より大きいことを確認して
+から待受を開始します。GPUなしでの動作を意図的に許可する場合だけ`--allow-cpu`を
+指定できます。
+
+別の待受IP、ポート、Ollamaを指定する例です。
+
+```bash
+python run_translation_server.py \
+  --host 192.168.1.50 --port 9000 \
+  --ollama-host 127.0.0.1 --ollama-port 11434 \
+  --model translategemma:12b
+```
+
+UFWを使用している場合は、Macが接続しているLANからの通信だけを許可します。
+
+```bash
+sudo ufw allow from 192.168.1.0/24 to any port 8765 proto tcp
+```
+
+認証や暗号化は行わないため、インターネットへ直接公開しないでください。
+
+### Windowsでサーバーを動かす場合
+
+R9700の推奨構成はUbuntu + ROCmです。WindowsやGPU診断非対応環境では、明示的に
+`--allow-cpu`を指定した場合だけ起動できます。
 
 ```powershell
-meeting-translation-server --host 0.0.0.0 --port 8765
+python run_translation_server.py --host 0.0.0.0 --port 8765 --allow-cpu
 ```
 
 ### Mac側（GUI）

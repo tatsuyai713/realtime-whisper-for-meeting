@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+import shutil
+import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -19,12 +25,102 @@ DEFAULT_OLLAMA_PORT = 11434
 MAX_REQUEST_BYTES = 1_000_000
 
 
+@dataclass(frozen=True)
+class RocmDiagnostics:
+    rocminfo_available: bool
+    device_names: tuple[str, ...]
+    targets: tuple[str, ...]
+    kfd_exists: bool
+    kfd_accessible: bool
+    error: str = ""
+
+    @property
+    def ready(self) -> bool:
+        return (
+            self.rocminfo_available
+            and bool(self.targets)
+            and self.kfd_exists
+            and self.kfd_accessible
+            and not self.error
+        )
+
+    @property
+    def is_r9700(self) -> bool:
+        return any("R9700" in name.upper() for name in self.device_names) and (
+            "gfx1201" in self.targets
+        )
+
+
+def parse_rocminfo(output: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    names = tuple(
+        dict.fromkeys(
+            match.strip()
+            for match in re.findall(r"^\s*Marketing Name:\s*(.+?)\s*$", output, re.MULTILINE)
+            if match.strip() and match.strip().lower() not in {"cpu", "unknown"}
+        )
+    )
+    targets = tuple(dict.fromkeys(re.findall(r"\bgfx\d+[a-z0-9]*\b", output.lower())))
+    return names, targets
+
+
+def collect_rocm_diagnostics() -> RocmDiagnostics:
+    kfd_exists = os.path.exists("/dev/kfd")
+    kfd_accessible = os.access("/dev/kfd", os.R_OK | os.W_OK)
+    rocminfo = shutil.which("rocminfo")
+    if rocminfo is None:
+        return RocmDiagnostics(False, (), (), kfd_exists, kfd_accessible)
+    try:
+        completed = subprocess.run(
+            [rocminfo],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return RocmDiagnostics(True, (), (), kfd_exists, kfd_accessible, str(exc))
+    names, targets = parse_rocminfo(completed.stdout)
+    error = completed.stderr.strip() if completed.returncode != 0 else ""
+    return RocmDiagnostics(True, names, targets, kfd_exists, kfd_accessible, error)
+
+
+def print_rocm_diagnostics(diagnostics: RocmDiagnostics) -> None:
+    print("ROCm GPU診断:")
+    print(
+        "  rocminfo: "
+        + ("利用可能" if diagnostics.rocminfo_available else "見つかりません")
+    )
+    print(
+        "  GPU: "
+        + (", ".join(diagnostics.device_names) if diagnostics.device_names else "未検出")
+    )
+    print(
+        "  LLVM target: "
+        + (", ".join(diagnostics.targets) if diagnostics.targets else "未検出")
+    )
+    if diagnostics.kfd_exists:
+        print("  /dev/kfd: " + ("アクセス可能" if diagnostics.kfd_accessible else "権限不足"))
+    else:
+        print("  /dev/kfd: 見つかりません")
+    if diagnostics.is_r9700:
+        print("  Radeon AI PRO R9700（gfx1201）: 対応構成を確認")
+    if diagnostics.error:
+        print(f"  エラー: {diagnostics.error}")
+
+
 class OllamaTranslationBackend:
-    def __init__(self, host: str, port: int, timeout: float = 60.0) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        timeout: float = 60.0,
+        require_gpu: bool = False,
+    ) -> None:
         self.base_url = translation_server_base_url(host, port)
         self.timeout = timeout
+        self.require_gpu = require_gpu
 
-    def check_model(self, model: str) -> None:
+    def check_model(self, model: str) -> int:
         request = urllib.request.Request(f"{self.base_url}/api/tags", method="GET")
         try:
             with urllib.request.urlopen(request, timeout=5) as response:
@@ -37,6 +133,56 @@ class OllamaTranslationBackend:
             raise RuntimeError(
                 f"翻訳モデル `{model}` がありません。`ollama pull {model}` を実行してください。"
             )
+        if not self.require_gpu:
+            return 0
+        size_vram = self._model_vram(model)
+        if size_vram <= 0:
+            self._warm_model(model)
+            size_vram = self._model_vram(model)
+        if size_vram <= 0:
+            raise RuntimeError(
+                f"モデル `{model}` がGPUへロードされていません。"
+                "`ollama ps`とOllamaのROCmログを確認してください。"
+            )
+        return size_vram
+
+    def _warm_model(self, model: str) -> None:
+        body = json.dumps(
+            {
+                "model": model,
+                "prompt": "Reply with OK.",
+                "stream": False,
+                "keep_alive": "30m",
+                "options": {"num_ctx": 512, "num_predict": 1},
+            }
+        ).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.base_url}/api/generate",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=180) as response:
+                response.read()
+        except (urllib.error.URLError, TimeoutError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise RuntimeError(f"GPUへのモデル読み込みに失敗しました: {reason}") from exc
+
+    def _model_vram(self, model: str) -> int:
+        request = urllib.request.Request(f"{self.base_url}/api/ps", method="GET")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            reason = getattr(exc, "reason", exc)
+            raise RuntimeError(f"OllamaのGPU使用状況を確認できません: {reason}") from exc
+        requested_names = {model, f"{model}:latest"}
+        for item in result.get("models", []):
+            running_name = str(item.get("name", item.get("model", "")))
+            if running_name in requested_names or running_name.removesuffix(":latest") == model:
+                return int(item.get("size_vram", 0) or 0)
+        return 0
 
     def translate(
         self,
@@ -189,15 +335,51 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ollama-host", default="127.0.0.1", help="OllamaのIP/ホスト")
     parser.add_argument("--ollama-port", type=int, default=DEFAULT_OLLAMA_PORT)
+    parser.add_argument(
+        "--model",
+        default="translategemma:12b",
+        help="起動時にGPUへロードして検証する翻訳モデル",
+    )
+    parser.add_argument(
+        "--check-gpu",
+        action="store_true",
+        help="ROCm GPUと権限を診断して終了",
+    )
+    parser.add_argument(
+        "--allow-cpu",
+        action="store_true",
+        help="GPUを利用できない場合のCPU起動を明示的に許可",
+    )
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    if sys.platform.startswith("linux"):
+        diagnostics = collect_rocm_diagnostics()
+        print_rocm_diagnostics(diagnostics)
+        if args.check_gpu:
+            return 0 if diagnostics.ready else 1
+        if not args.allow_cpu and not diagnostics.ready:
+            print(
+                "ROCm GPUを利用できません。ドライバー、render/videoグループ、"
+                "/dev/kfdを確認してください。"
+            )
+            return 1
+    elif args.check_gpu or not args.allow_cpu:
+        print("GPU必須の翻訳サーバーはROCm対応Linuxで起動してください。")
+        return 1
     try:
-        backend = OllamaTranslationBackend(args.ollama_host, args.ollama_port)
+        backend = OllamaTranslationBackend(
+            args.ollama_host,
+            args.ollama_port,
+            require_gpu=not args.allow_cpu,
+        )
+        size_vram = backend.check_model(args.model)
+        if size_vram:
+            print(f"Ollama GPUモデルを確認: {args.model}（VRAM {size_vram / 1024**3:.1f} GiB）")
         server = TranslationHTTPServer((args.host, args.port), backend)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         print(f"翻訳サーバーを起動できません: {exc}")
         return 1
     print(f"翻訳サーバーを起動しました: http://{args.host}:{args.port}", flush=True)

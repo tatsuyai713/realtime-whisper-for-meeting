@@ -3,13 +3,20 @@ import queue
 import threading
 import urllib.parse
 import urllib.request
+from unittest.mock import MagicMock
 
 import pytest
 
 from meeting_translator.local_service import LocalProcessor
 from meeting_translator.translation_client import check_translation_server
 from meeting_translator.translation_protocol import translation_server_base_url
-from meeting_translator.translation_server import TranslationHTTPServer
+from meeting_translator.translation_server import (
+    OllamaTranslationBackend,
+    RocmDiagnostics,
+    TranslationHTTPServer,
+    build_parser,
+    parse_rocminfo,
+)
 
 
 class FakeTranslationBackend:
@@ -37,6 +44,89 @@ class FakeTranslationBackend:
             }
         )
         return "こんにちは"
+
+
+def test_r9700_rocm_diagnostics() -> None:
+    names, targets = parse_rocminfo(
+        """
+          Name:                    gfx1201
+          Marketing Name:          AMD Radeon AI PRO R9700
+          Name:                    amdgcn-amd-amdhsa--gfx1201
+        """
+    )
+    diagnostics = RocmDiagnostics(
+        rocminfo_available=True,
+        device_names=names,
+        targets=targets,
+        kfd_exists=True,
+        kfd_accessible=True,
+    )
+    assert names == ("AMD Radeon AI PRO R9700",)
+    assert targets == ("gfx1201",)
+    assert diagnostics.ready is True
+    assert diagnostics.is_r9700 is True
+
+
+def test_translation_server_gpu_flags() -> None:
+    args = build_parser().parse_args(["--check-gpu", "--allow-cpu"])
+    assert args.check_gpu is True
+    assert args.allow_cpu is True
+
+
+def _urlopen_context(payload: dict[str, object]) -> MagicMock:
+    response = MagicMock()
+    response.read.return_value = json.dumps(payload).encode()
+    context = MagicMock()
+    context.__enter__.return_value = response
+    return context
+
+
+def test_ollama_backend_requires_model_vram(monkeypatch) -> None:
+    responses = iter(
+        [
+            _urlopen_context({"models": [{"name": "translategemma:12b"}]}),
+            _urlopen_context(
+                {
+                    "models": [
+                        {
+                            "name": "translategemma:12b",
+                            "size_vram": 12 * 1024**3,
+                        }
+                    ]
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "meeting_translator.translation_server.urllib.request.urlopen",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    backend = OllamaTranslationBackend("127.0.0.1", 11434, require_gpu=True)
+    assert backend.check_model("translategemma:12b") == 12 * 1024**3
+
+
+def test_ollama_backend_rejects_cpu_only_model(monkeypatch) -> None:
+    responses = iter(
+        [
+            _urlopen_context({"models": [{"name": "translategemma:12b"}]}),
+            _urlopen_context({"models": []}),
+            _urlopen_context({"done": True}),
+            _urlopen_context(
+                {
+                    "models": [
+                        {"name": "translategemma:12b", "size_vram": 0}
+                    ]
+                }
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "meeting_translator.translation_server.urllib.request.urlopen",
+        lambda *_args, **_kwargs: next(responses),
+    )
+    backend = OllamaTranslationBackend("127.0.0.1", 11434, require_gpu=True)
+    with pytest.raises(RuntimeError, match="GPUへロードされていません"):
+        backend.check_model("translategemma:12b")
 
 
 def test_translation_server_health_and_remote_translation() -> None:

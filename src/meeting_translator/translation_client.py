@@ -20,7 +20,7 @@ def check_translation_server(
     query = urllib.parse.urlencode({"model": model})
     request = urllib.request.Request(f"{base_url}/health?{query}", method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=180) as response:
             result = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         try:
