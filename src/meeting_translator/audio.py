@@ -184,6 +184,8 @@ class AudioCapture:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, name="audio-capture", daemon=True)
         self._thread.start()

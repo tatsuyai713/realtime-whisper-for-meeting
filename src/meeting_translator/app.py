@@ -91,6 +91,7 @@ class AppSignals(QObject):
     status = Signal(str)
     error = Signal(str)
     level = Signal(float)
+    processor_ready = Signal()
 
 
 class MainWindow(QMainWindow):
@@ -120,6 +121,7 @@ class MainWindow(QMainWindow):
         self.signals.status.connect(self._set_status)
         self.signals.error.connect(self._show_runtime_error)
         self.signals.level.connect(self._set_level)
+        self.signals.processor_ready.connect(self._start_audio_capture)
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -536,6 +538,7 @@ class MainWindow(QMainWindow):
                 translation_target=translation_target,
                 translation_server_host=self.translation_server_host_edit.text().strip(),
                 translation_server_port=self.translation_server_port_spin.value(),
+                on_ready=self.signals.processor_ready.emit,
                 **callbacks,
             )
         self.capture = AudioCapture(
@@ -548,9 +551,10 @@ class MainWindow(QMainWindow):
             ),
             overlap_seconds=performance.overlap_seconds if backend == "local" else 0.8,
         )
-        self.processor.start()
-        self.capture.start()
         self.running = True
+        self.processor.start()
+        if backend == "openai":
+            self.capture.start()
         self.started_at = datetime.now()
         self.start_button.setText("停止")
         self.start_button.setStyleSheet("background: #d64545;")
@@ -569,6 +573,13 @@ class MainWindow(QMainWindow):
         self.translation_server_host_edit.setEnabled(False)
         self.translation_server_port_spin.setEnabled(False)
         self.status_dot.setStyleSheet("color: #27a96b;")
+        if backend == "openai":
+            self._set_status("音声を待っています…")
+
+    def _start_audio_capture(self) -> None:
+        if not self.running or self.capture is None:
+            return
+        self.capture.start()
         self._set_status("音声を待っています…")
 
     def stop_capture(self) -> None:

@@ -129,6 +129,7 @@ class LocalProcessor:
         translation_server_host: str = DEFAULT_TRANSLATION_SERVER_HOST,
         translation_server_port: int = DEFAULT_TRANSLATION_SERVER_PORT,
         whisperkit_compute_profile: str = "ane",
+        on_ready: Callable[[], None] | None = None,
     ) -> None:
         self.language = language
         self.translation_enabled = translation_enabled
@@ -145,6 +146,7 @@ class LocalProcessor:
         self.on_translation = on_translation
         self.on_status = on_status
         self.on_error = on_error
+        self.on_ready = on_ready or (lambda: None)
         self._transcription_thread: threading.Thread | None = None
         self._translation_thread: threading.Thread | None = None
         self._whisperkit_process: subprocess.Popen[bytes] | None = None
@@ -184,7 +186,14 @@ class LocalProcessor:
         self._stop_event.set()
         if self._whisperkit_process and self._whisperkit_process.poll() is None:
             self._whisperkit_process.terminate()
-        self.audio_queue.put(None)
+        try:
+            self.audio_queue.put_nowait(None)
+        except queue.Full:
+            try:
+                self.audio_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self.audio_queue.put_nowait(None)
         for thread in (self._transcription_thread, self._translation_thread):
             if thread and thread.is_alive():
                 thread.join(timeout=0.1)
@@ -285,6 +294,7 @@ class LocalProcessor:
                 timeout=120,
             )
             self._set_idle_status()
+            self.on_ready()
             while not self._stop_event.is_set():
                 chunk = self.audio_queue.get()
                 if chunk is None:
@@ -363,6 +373,7 @@ class LocalProcessor:
                 )
                 return
             self._set_idle_status()
+            self.on_ready()
             while True:
                 chunk = self.audio_queue.get()
                 if chunk is None:
@@ -417,6 +428,7 @@ class LocalProcessor:
             model_name = FASTER_WHISPER_MODELS.get(self.whisper_model, self.whisper_model)
             model = WhisperModel(model_name, device="auto", compute_type="auto")
             self._set_idle_status()
+            self.on_ready()
             while True:
                 chunk = self.audio_queue.get()
                 if chunk is None:
