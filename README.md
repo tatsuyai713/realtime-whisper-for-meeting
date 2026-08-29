@@ -138,12 +138,41 @@ ls -l /dev/kfd /dev/dri/renderD*
 最新版とAMD ROCmランタイムをインストールします。
 
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-curl -fsSL https://ollama.com/download/ollama-linux-amd64-rocm.tar.zst \
-  | sudo tar x -C /usr
+if command -v ollama >/dev/null 2>&1 && \
+   find /usr/lib/ollama /usr/local/lib/ollama -maxdepth 1 \
+     -type d -name 'rocm*' -print -quit 2>/dev/null \
+     | grep -q .; then
+  echo "Ollama AMD/ROCm版は導入済みです。ダウンロードをスキップします。"
+else
+  sudo apt-get update
+  sudo apt-get install -y zstd
+  curl -fsSL https://ollama.com/install.sh | sh
+fi
 sudo usermod -aG render,video ollama
 sudo systemctl restart ollama
-ollama pull translategemma:12b
+
+if ollama show translategemma:12b >/dev/null 2>&1; then
+  echo "translategemma:12bは取得済みです。ダウンロードをスキップします。"
+else
+  ollama pull translategemma:12b
+fi
+```
+
+公式インストーラーが`AMD GPU ready.`と表示した場合、AMD ROCmランタイムの導入も
+完了しているため、ROCmアーカイブを手動で再展開する必要はありません。
+手動インストール時に`tar: Archive is compressed. Use --zstd option`と表示された場合は、
+`zstd`を介して展開します。
+
+```bash
+if find /usr/lib/ollama /usr/local/lib/ollama -maxdepth 1 \
+     -type d -name 'rocm*' -print -quit 2>/dev/null \
+     | grep -q .; then
+  echo "ROCmランタイムは導入済みです。ダウンロードをスキップします。"
+else
+  curl -fsSL https://ollama.com/download/ollama-linux-amd64-rocm.tar.zst \
+    | zstd -d | sudo tar -xf - -C /usr
+fi
+sudo systemctl restart ollama
 ```
 
 簡単な推論を一度実行し、`PROCESSOR`が`100% GPU`またはGPUを含む表示になることを
