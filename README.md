@@ -1,6 +1,6 @@
 # Meeting Live Translator
 
-Mac / Windows の会議音声を取り込み、左側に原文、右側に少し遅れて日本語訳を
+macOS / Windows / Ubuntu の会議音声を取り込み、左側に原文、右側に少し遅れて日本語訳を
 表示する Python デスクトップアプリです。無音を検出して発言を区切るため、
 会話のまとまりごとに自動改行されます。
 
@@ -30,8 +30,7 @@ WhisperKitの単語タイムスタンプで重複音声部分だけを除外し�
 補助的な類似判定で重複文字を自動除去します。日本語・中国語・韓国語では単語途中を
 切らないようタイムスタンプ切除を避け、強制分割された区間を同じ発話として境界修復
 してから表示します。英語でも前区間に同じ語が確認できた場合だけ重複部分を除外し、
-新しく認識された語は保持します。表示時は `.`、`?`、`!`、`。`、`？`、`！` ごとに
-自動改行します。
+新しく認識された語は保持します。表示は発話区間ごとに段落へ分けます。
 NPUを選ぶと文字起こしとOllama翻訳がGPUを奪い合わず、並行処理しやすくなります。
 Apple Silicon Macの既定値は「高速（圧縮small）」+ Neural Engineです。モデルは初回使用時だけ
 自動取得されます。処理後はステータス欄に `RTF` と実時間に対する処理倍率を表示します。
@@ -64,7 +63,7 @@ NVIDIA GPU搭載PCでは「GPU（NVIDIA CUDA）」を選択します。文字起
 
 Python 3.10 以上を用意し、このフォルダで次を実行します。
 
-### macOS / Linux shell
+### macOS
 
 ```bash
 python3 -m venv .venv
@@ -83,7 +82,9 @@ brew install whisperkit-cli
 
 `whisperkit-cli` はApple Silicon MacのNeural Engine用です。初回に選んだ音声モデルを
 取得し、Core MLが端末向けにコンパイルするため数分かかることがあります。2回目以降は
-キャッシュを利用します。Windowsではこの手順は不要です。
+キャッシュを利用します。ただし、アプリを停止すると音声モデルをメモリから解放するため、
+次の「開始」でもロード待ちが発生します。Intel Macでは `whisperkit-cli` は不要で、
+「高速化」から CPU を選びます。
 
 ローカル翻訳を使う場合は [Ollama](https://ollama.com/) をインストールし、先に
 モデルを取得してください。
@@ -97,6 +98,20 @@ ollama pull translategemma:4b
 ```bash
 ollama pull translategemma:12b
 ```
+
+### Ubuntu
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e ".[local]"
+ollama pull translategemma:4b
+python run.py
+```
+
+Ubuntu の「高速化」には「自動」「GPU（NVIDIA CUDA）」「CPU」が表示されます。NVIDIA GPU
+を使用する場合は、次の CUDA 設定も行ってください。
 
 ### Windows PowerShell
 
@@ -115,7 +130,7 @@ python -m pip install -e ".[local]"
 ollama pull translategemma:4b
 ```
 
-### NVIDIA GPU（Windows / Linux）
+### NVIDIA GPU（Windows / Ubuntu）
 
 NVIDIAドライバーを最新化してから、通常の Local モードのインストールを実行します。Linuxで
 CUDAライブラリが見つからない場合は、CUDA 12版の依存ライブラリも追加します。
@@ -135,7 +150,7 @@ APIキーは画面に入力するか、起動前に `OPENAI_API_KEY` 環境変�
 
 ## 別PCで日本語翻訳を実行する
 
-文字起こしはMac側で実行し、日本語翻訳だけをLAN内の別マシン上のOllamaへ
+文字起こしはクライアントPCで実行し、日本語翻訳だけをLAN内の別マシン上のOllamaへ
 任せることができます。推奨サーバーはUbuntuとAMD Radeon AI PRO R9700です。
 翻訳サーバーは既定でGPU必須となり、ROCmまたはOllamaがCPUへフォールバックしている
 場合は起動しません。
@@ -253,7 +268,7 @@ python run_translation_server.py \
   --model translategemma:12b
 ```
 
-UFWを使用している場合は、Macが接続しているLANからの通信だけを許可します。
+UFWを使用している場合は、クライアントPCが接続しているLANからの通信だけを許可します。
 
 ```bash
 sudo ufw allow from 192.168.1.0/24 to any port 8765 proto tcp
@@ -270,7 +285,7 @@ R9700の推奨構成はUbuntu + ROCmです。WindowsやGPU診断非対応環境�
 python run_translation_server.py --host 0.0.0.0 --port 8765 --allow-cpu
 ```
 
-### Mac側（GUI）
+### クライアントPC側（GUI）
 
 1. 文字起こしに使う処理方式（OpenAIまたはLocal）を選択する
 2. 「日本語翻訳」をONにする
@@ -310,10 +325,10 @@ BlackHole等の仮想入力も引き続き一覧から選択できます。
 
 ## 操作
 
-1. 「システム音声」と表示されたデバイスを選ぶ
+1. 使用する音声入力またはシステム音声デバイスを選ぶ
 2. 発話言語（または自動検出）を選ぶ
 3. OpenAIまたはLocalを選ぶ
-4. Apple Silicon MacのLocalモードでは、目的に合う「Mac最適化」を選ぶ
+4. Apple Silicon MacのLocalモードでは、目的に合う「Mac最適化」を選ぶ。Windows/Ubuntuでは「高速化」から自動、NVIDIA CUDA、またはCPUを選ぶ
 5. 必要に応じて日本語翻訳をON/OFFする
 6. OpenAIの場合はAPIキーを入力する
 7. 「開始」を押す

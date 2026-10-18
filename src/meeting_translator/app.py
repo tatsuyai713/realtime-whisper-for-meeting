@@ -216,7 +216,6 @@ class MainWindow(QMainWindow):
         self.performance_profile_combo.addItem("カスタム", "custom")
         default_profile = os.environ.get(
             "LOCAL_PERFORMANCE_PROFILE",
-            "mac-fast"
             "mac-fast" if self.is_apple_silicon else "custom",
         )
         profile_index = self.performance_profile_combo.findData(default_profile)
