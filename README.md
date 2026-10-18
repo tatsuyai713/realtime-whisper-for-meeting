@@ -151,17 +151,17 @@ APIキーは画面に入力するか、起動前に `OPENAI_API_KEY` 環境変�
 ## 別PCで日本語翻訳を実行する
 
 文字起こしはクライアントPCで実行し、日本語翻訳だけをLAN内の別マシン上のOllamaへ
-任せることができます。推奨サーバーはUbuntuとAMD Radeon AI PRO R9700です。
-翻訳サーバーは既定でGPU必須となり、ROCmまたはOllamaがCPUへフォールバックしている
-場合は起動しません。
+任せることができます。翻訳サーバーは Ubuntu 上の AMD Radeon GPU（ROCm）または
+NVIDIA GPU（CUDA）を推奨します。翻訳サーバーは既定で GPU 必須となり、Ollama が
+CPU へフォールバックしている場合は起動しません。
 
-### Ubuntu + Radeon AI PRO R9700（推奨）
+### AMD Radeon GPU + ROCm（Ubuntu）
 
-R9700はRDNA4の`gfx1201`としてROCmとOllamaのLinux版で正式対応されています。
-ROCmの対応OSを厳密に合わせる必要があるため、Ubuntu 24.04.4または22.04.5を
-使用してください。以下はUbuntu 24.04系、ROCm 7.2.4を例にしています。バージョンを
-変更する場合は[AMDの対応表](https://rocm.docs.amd.com/projects/install-on-linux/en/docs-7.2.3/reference/system-requirements.html)と
-[ROCm Quick Start](https://rocm.docs.amd.com/projects/install-on-linux/en/docs-7.2.4/install/quick-start.html)を確認してください。
+使用する Radeon GPU が ROCm と Ollama の Linux 版でサポートされることを、事前に
+[ROCm の対応表](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/reference/system-requirements.html)と
+[Ollama GPU 対応表](https://github.com/ollama/ollama/blob/main/docs/gpu.mdx)で確認してください。
+以下は Ubuntu 24.04 と ROCm 7.2.4 の例です。OS、GPU、ROCm の対応する組み合わせを
+使用してください。
 
 #### 1. ROCmドライバーをインストール
 
@@ -176,10 +176,10 @@ sudo usermod -aG render,video "$USER"
 sudo reboot
 ```
 
-再起動後、R9700と`gfx1201`が表示されることを確認します。
+再起動後、Radeon GPU と ROCm ターゲットが表示されることを確認します。
 
 ```bash
-rocminfo | grep -E "Marketing Name|gfx1201"
+rocminfo | grep -E "Marketing Name|gfx"
 ls -l /dev/kfd /dev/dri/renderD*
 ```
 
@@ -234,10 +234,9 @@ ollama run translategemma:12b "Translate Hello into Japanese."
 ollama ps
 ```
 
-OllamaはR9700を`gfx1201`として正式サポートしており、LinuxではROCm v7ドライバーが
-必要です。[Ollama AMD GPU対応表](https://github.com/ollama/ollama/blob/main/docs/gpu.mdx)
-古いROCm 6系ドライバーではGPU検出がタイムアウトしてCPUへフォールバックするため、
-`HSA_OVERRIDE_GFX_VERSION`で回避せずROCm v7へ更新してください。
+GPU 検出に失敗して CPU へフォールバックする場合は、GPU に対応した ROCm と Ollama の
+組み合わせを使用してください。`HSA_OVERRIDE_GFX_VERSION` で未対応 GPU を偽装する構成は
+推奨しません。
 
 #### 3. 翻訳サーバーを起動
 
@@ -254,7 +253,7 @@ python run_translation_server.py \
   --model translategemma:12b
 ```
 
-`--check-gpu`は`rocminfo`、`gfx1201`、`/dev/kfd`のアクセス権を検査します。通常起動時は
+`--check-gpu`は`rocminfo`、Radeon GPU、`/dev/kfd`のアクセス権を検査します。通常起動時は
 さらに指定モデルをOllamaへロードし、`/api/ps`の`size_vram`が0より大きいことを確認して
 から待受を開始します。GPUなしでの動作を意図的に許可する場合だけ`--allow-cpu`を
 指定できます。
@@ -276,14 +275,20 @@ sudo ufw allow from 192.168.1.0/24 to any port 8765 proto tcp
 
 認証や暗号化は行わないため、インターネットへ直接公開しないでください。
 
-### Windowsでサーバーを動かす場合
+### NVIDIA GPU + CUDA（Windows / Ubuntu）
 
-R9700の推奨構成はUbuntu + ROCmです。WindowsやGPU診断非対応環境では、明示的に
-`--allow-cpu`を指定した場合だけ起動できます。
+NVIDIA の最新ドライバーと、GPU 対応版の Ollama を導入してください。`ollama ps` で
+翻訳モデルの `PROCESSOR` に GPU が含まれることを確認してから、翻訳サーバーを起動します。
+NVIDIA 構成では `--check-gpu` は ROCm 用の診断なので使用しません。
 
-```powershell
-python run_translation_server.py --host 0.0.0.0 --port 8765 --allow-cpu
+```bash
+ollama pull translategemma:4b
+ollama run translategemma:4b "Translate Hello into Japanese."
+ollama ps
+python run_translation_server.py --host 0.0.0.0 --port 8765 --model translategemma:4b
 ```
+
+GPU を使用しない翻訳サーバーを意図的に許可する場合だけ、`--allow-cpu` を指定します。
 
 ### クライアントPC側（GUI）
 
