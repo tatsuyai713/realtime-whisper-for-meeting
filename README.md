@@ -12,16 +12,18 @@ Mac / Windows の会議音声を取り込み、左側に原文、右側に少し
 - Localモード
   - Apple Silicon Mac（高速・既定）: `WhisperKit` + Core ML / Neural Engine
   - Apple Silicon Mac（代替）: `mlx-whisper` + Metal GPU
-  - Windows: `faster-whisper` + CUDA/CPU
+  - NVIDIA GPU搭載PC: `faster-whisper` + CUDA（画面で明示的に選択可能）
+  - GPU非搭載PC: `faster-whisper` + CPU
   - モデル: `tiny` / `base` / `small` / 圧縮`small` / `turbo` / `medium` / `large-v3`
-  - 日本語翻訳: 翻訳専用の `translategemma:12b`（画面で変更可能）
+  - 日本語翻訳: `translategemma:4b`（高速）/ `translategemma:12b`（高精度）/ Qwen 2.5（画面で選択または任意入力可能）
 
 日本語翻訳は画面からON/OFFできます。OpenAIモードではAPI使用料金がかかります。
 Localモードでは音声もテキストもPC外へ送信しません。
 ただし「別PC（翻訳サーバー）」を選択した場合、文字起こし結果は指定したLAN内の
 翻訳サーバーへ送信されます。音声データは送信されません。
-Apple Siliconでは画面の「高速化」でNPU（Neural Engine）またはGPU（Metal）を
-選択できます。M4 Macでは専用の高速化プリセットも表示されます。ローカル処理では
+Apple Silicon Macでは画面の「高速化」でNPU（Neural Engine）またはGPU（Metal）を
+選択でき、「Mac最適化」プリセットも使用できます。WindowsとUbuntuでは「高速化」から
+NVIDIA CUDA GPU、CPU、または自動を選択できます。ローカル処理では
 選択したプリセットに応じて音声を最大3.5～5秒で区切り、境界の0.4～0.8秒を重ねて
 単語の途中切れを防ぎます。発話開始前の0.3秒も保持し、小さい語頭音を取りこぼしません。
 WhisperKitの単語タイムスタンプで重複音声部分だけを除外し、表記揺れがある場合も
@@ -31,10 +33,23 @@ WhisperKitの単語タイムスタンプで重複音声部分だけを除外し�
 新しく認識された語は保持します。表示時は `.`、`?`、`!`、`。`、`？`、`！` ごとに
 自動改行します。
 NPUを選ぶと文字起こしとOllama翻訳がGPUを奪い合わず、並行処理しやすくなります。
-M4 Macの既定値は「高速（圧縮small）」+ Neural Engineです。モデルは初回使用時だけ
+Apple Silicon Macの既定値は「高速（圧縮small）」+ Neural Engineです。モデルは初回使用時だけ
 自動取得されます。処理後はステータス欄に `RTF` と実時間に対する処理倍率を表示します。
 
-### M4最適化プリセット
+### 実時間向けのモデル選択
+
+Apple Silicon Macでは「NPU（Neural Engine）」と音声モデル `small 圧縮 216MB`、翻訳モデル
+`translategemma:4b` の組み合わせが、文字起こしと翻訳を別の演算器で並行できるため最初の選択として
+適しています。精度を優先する場合は翻訳モデルを `translategemma:12b`、音声モデルを `turbo` または
+`large-v3` に変更します。GPUメモリが不足する場合は、音声モデルを先に小さくしてください。
+
+NVIDIA GPU搭載PCでは「GPU（NVIDIA CUDA）」を選択します。文字起こしは CUDA `float16`、Ollama翻訳は
+同じ NVIDIA GPU を使います。両方を同時に動かすには十分な VRAM が必要です。8GB程度では
+`small` + `translategemma:4b`、12GB以上では `turbo` + `translategemma:4b`、16GB以上では
+`turbo` + `translategemma:12b` を目安にしてください。表示される RTF が `1.00` 未満なら、音声の長さより
+速く処理できています。
+
+### Mac最適化プリセット
 
 - 高速（圧縮small）: WhisperKitの`small_216MB`、5秒チャンク、0.4秒オーバーラップ
 - バランス（Turbo 4bit）: `large-v3-v20240930_turbo_632MB`、5秒チャンク
@@ -74,6 +89,12 @@ brew install whisperkit-cli
 モデルを取得してください。
 
 ```bash
+ollama pull translategemma:4b
+```
+
+精度を優先する場合は、より大きいモデルを取得して画面から選択します。
+
+```bash
 ollama pull translategemma:12b
 ```
 
@@ -91,8 +112,23 @@ Localモードを使う場合は、PowerShellでも次を追加実行します�
 
 ```powershell
 python -m pip install -e ".[local]"
-ollama pull translategemma:12b
+ollama pull translategemma:4b
 ```
+
+### NVIDIA GPU（Windows / Linux）
+
+NVIDIAドライバーを最新化してから、通常の Local モードのインストールを実行します。Linuxで
+CUDAライブラリが見つからない場合は、CUDA 12版の依存ライブラリも追加します。
+
+```bash
+python -m pip install -e ".[local]"
+python -m pip install "nvidia-cublas-cu12>=12" "nvidia-cudnn-cu12>=9,<10"
+```
+
+Windowsでは NVIDIA の最新ドライバーを導入してください。アプリの Local モードで「GPU（NVIDIA CUDA）」を
+選んで開始すると、CUDA `float16` を利用可能か検査します。利用できない場合は CPU へ黙って切り替えず、
+ドライバーまたは CTranslate2 の CUDA ランタイムを確認するエラーを表示します。Ollama は
+[公式の GPU 対応手順](https://docs.ollama.com/gpu)に従って導入し、翻訳モデルを取得してください。
 
 APIキーは画面に入力するか、起動前に `OPENAI_API_KEY` 環境変数へ設定できます。
 画面に入力したキーは保存されません。
@@ -277,7 +313,7 @@ BlackHole等の仮想入力も引き続き一覧から選択できます。
 1. 「システム音声」と表示されたデバイスを選ぶ
 2. 発話言語（または自動検出）を選ぶ
 3. OpenAIまたはLocalを選ぶ
-4. M4 MacのLocalモードでは、目的に合う「M4最適化」を選ぶ
+4. Apple Silicon MacのLocalモードでは、目的に合う「Mac最適化」を選ぶ
 5. 必要に応じて日本語翻訳をON/OFFする
 6. OpenAIの場合はAPIキーを入力する
 7. 「開始」を押す

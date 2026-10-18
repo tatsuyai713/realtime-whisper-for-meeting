@@ -185,5 +185,5 @@ def merge_continued_transcript(previous: str, current: str) -> str:
 
 def split_transcript_sentences(text: str) -> list[str]:
     """Create readable display paragraphs without changing transcript wording."""
-    parts = re.split(r"(?<=[.!?。！？])\s+", text.strip())
+    parts = re.split(r"(?<=[.!?。！？])\s*", text.strip())
     return [part.strip() for part in parts if part.strip()]

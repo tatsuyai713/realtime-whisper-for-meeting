@@ -34,6 +34,7 @@ from .audio import AudioCapture, list_audio_devices, preferred_device_index
 from .local_service import (
     DEFAULT_OLLAMA_MODEL,
     DEFAULT_WHISPER_MODEL,
+    LOCAL_TRANSLATION_MODELS,
     LocalProcessor,
     check_ollama,
     local_engine_label,
@@ -69,20 +70,8 @@ LANGUAGES = [
 ]
 
 
-def _apple_chip_name() -> str:
-    if platform.system() != "Darwin" or platform.machine() != "arm64":
-        return ""
-    try:
-        completed = subprocess.run(
-            ["sysctl", "-n", "machdep.cpu.brand_string"],
-            capture_output=True,
-            text=True,
-            timeout=2,
-            check=False,
-        )
-        return completed.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        return ""
+def _is_apple_silicon() -> bool:
+    return platform.system() == "Darwin" and platform.machine() == "arm64"
 
 
 class AppSignals(QObject):
@@ -105,10 +94,12 @@ class MainWindow(QMainWindow):
         self.devices: list[AudioDevice] = []
         self.running = False
         self.started_at: datetime | None = None
-        self.apple_chip = _apple_chip_name()
+        self.is_macos = platform.system() == "Darwin"
+        self.is_apple_silicon = _is_apple_silicon()
         self._original_blocks: list[str] = []
         self._translation_blocks: list[str] = []
         self._continues_by_sequence: dict[int, bool] = {}
+        self._applying_performance_profile = False
         self.signals = AppSignals()
         self._connect_signals()
         self._build_ui()
@@ -133,7 +124,7 @@ class MainWindow(QMainWindow):
         title_box = QVBoxLayout()
         title = QLabel("Meeting Live Translator")
         title.setObjectName("title")
-        subtitle = QLabel("会議の音声を、原文と日本語訳で追いかけます")
+        subtitle = QLabel("会議の音声をリアルタイムで書き起こしと日本語訳を行います")
         subtitle.setObjectName("subtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -189,12 +180,14 @@ class MainWindow(QMainWindow):
         self.local_model_label = QLabel("音声モデル")
         self.local_engine_label = QLabel("高速化")
         self.local_engine_combo = QComboBox()
-        if platform.system() == "Darwin" and platform.machine() == "arm64":
+        if self.is_apple_silicon:
             self.local_engine_combo.addItem("NPU（Neural Engine）", "whisperkit")
             self.local_engine_combo.addItem("GPU（Metal）", "mlx")
         else:
             self.local_engine_combo.addItem("自動", "auto")
-        self.local_engine_combo.currentIndexChanged.connect(self._update_processing_options)
+            self.local_engine_combo.addItem("GPU（NVIDIA CUDA）", "cuda")
+            self.local_engine_combo.addItem("CPU", "cpu")
+        self.local_engine_combo.currentIndexChanged.connect(self._select_custom_performance)
 
         self.local_model_combo = QComboBox()
         for label, model in (
@@ -212,18 +205,19 @@ class MainWindow(QMainWindow):
             os.environ.get("LOCAL_WHISPER_MODEL", DEFAULT_WHISPER_MODEL)
         )
         self.local_model_combo.setCurrentIndex(max(0, model_index))
-        self.local_model_combo.currentTextChanged.connect(self._update_processing_options)
+        self.local_model_combo.currentIndexChanged.connect(self._select_custom_performance)
 
-        self.performance_profile_label = QLabel("M4最適化")
+        self.performance_profile_label = QLabel("Mac最適化")
         self.performance_profile_combo = QComboBox()
-        if self.apple_chip.startswith("Apple M4"):
-            self.performance_profile_combo.addItem("高速（圧縮small）", "m4-fast")
-            self.performance_profile_combo.addItem("バランス（Turbo 4bit）", "m4-balanced")
-            self.performance_profile_combo.addItem("高精度（large-v3）", "m4-accuracy")
+        if self.is_apple_silicon:
+            self.performance_profile_combo.addItem("高速（圧縮small）", "mac-fast")
+            self.performance_profile_combo.addItem("バランス（Turbo 4bit）", "mac-balanced")
+            self.performance_profile_combo.addItem("高精度（large-v3）", "mac-accuracy")
         self.performance_profile_combo.addItem("カスタム", "custom")
         default_profile = os.environ.get(
             "LOCAL_PERFORMANCE_PROFILE",
-            "m4-fast" if self.apple_chip.startswith("Apple M4") else "custom",
+            "mac-fast"
+            "mac-fast" if self.is_apple_silicon else "custom",
         )
         profile_index = self.performance_profile_combo.findData(default_profile)
         self.performance_profile_combo.setCurrentIndex(max(0, profile_index))
@@ -237,16 +231,25 @@ class MainWindow(QMainWindow):
             os.environ.get("WHISPERKIT_COMPUTE_PROFILE", "ane")
         )
         self.compute_profile_combo.setCurrentIndex(max(0, compute_index))
-        self.compute_profile_combo.currentIndexChanged.connect(self._update_processing_options)
+        self.compute_profile_combo.currentIndexChanged.connect(self._select_custom_performance)
         self.performance_profile_combo.currentIndexChanged.connect(
             self._apply_performance_profile
         )
         self.ollama_model_label = QLabel("翻訳モデル")
-        self.ollama_model_edit = QLineEdit(
-            os.environ.get("OLLAMA_TRANSLATION_MODEL", DEFAULT_OLLAMA_MODEL)
+        self.ollama_model_edit = QComboBox()
+        self.ollama_model_edit.setEditable(True)
+        self.ollama_model_edit.setMinimumWidth(220)
+        for label, model in LOCAL_TRANSLATION_MODELS:
+            self.ollama_model_edit.addItem(label, model)
+        configured_translation_model = os.environ.get(
+            "OLLAMA_TRANSLATION_MODEL", DEFAULT_OLLAMA_MODEL
         )
-        self.ollama_model_edit.setMinimumWidth(120)
-        self.ollama_model_edit.textChanged.connect(self._update_processing_options)
+        configured_model_index = self.ollama_model_edit.findData(configured_translation_model)
+        if configured_model_index >= 0:
+            self.ollama_model_edit.setCurrentIndex(configured_model_index)
+        else:
+            self.ollama_model_edit.setEditText(configured_translation_model)
+        self.ollama_model_edit.currentTextChanged.connect(self._update_processing_options)
 
         self.translation_target_label = QLabel("翻訳実行")
         self.translation_target_combo = QComboBox()
@@ -346,7 +349,7 @@ class MainWindow(QMainWindow):
         self.permission_button = QPushButton("Mac音声権限")
         self.permission_button.setToolTip("macOSの「画面収録とシステムオーディオ」設定を開きます")
         self.permission_button.clicked.connect(self.open_macos_audio_permissions)
-        self.permission_button.setVisible(platform.system() == "Darwin")
+        self.permission_button.setVisible(self.is_macos)
         footer.addWidget(self.hint_label)
         footer.addStretch()
         footer.addWidget(self.permission_button)
@@ -358,22 +361,35 @@ class MainWindow(QMainWindow):
 
     def _apply_performance_profile(self) -> None:
         profile = self.performance_profile_combo.currentData()
-        if profile != "custom":
-            performance = resolve_local_performance(
-                profile,
-                custom_model=str(self.local_model_combo.currentData()),
-                custom_engine=str(self.local_engine_combo.currentData()),
-                custom_compute_profile=str(self.compute_profile_combo.currentData()),
-            )
-            for combo, value in (
-                (self.local_model_combo, performance.model),
-                (self.local_engine_combo, performance.engine),
-                (self.compute_profile_combo, performance.compute_profile),
-            ):
-                index = combo.findData(value)
-                if index >= 0:
-                    combo.setCurrentIndex(index)
+        self._applying_performance_profile = True
+        try:
+            if profile != "custom":
+                performance = resolve_local_performance(
+                    profile,
+                    custom_model=str(self.local_model_combo.currentData()),
+                    custom_engine=str(self.local_engine_combo.currentData()),
+                    custom_compute_profile=str(self.compute_profile_combo.currentData()),
+                )
+                for combo, value in (
+                    (self.local_model_combo, performance.model),
+                    (self.local_engine_combo, performance.engine),
+                    (self.compute_profile_combo, performance.compute_profile),
+                ):
+                    index = combo.findData(value)
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+        finally:
+            self._applying_performance_profile = False
         self._update_processing_options()
+
+    def _select_custom_performance(self) -> None:
+        if self._applying_performance_profile:
+            return
+        custom_index = self.performance_profile_combo.findData("custom")
+        if custom_index >= 0 and self.performance_profile_combo.currentIndex() != custom_index:
+            self.performance_profile_combo.setCurrentIndex(custom_index)
+        else:
+            self._update_processing_options()
 
     def _make_text_panel(
         self, parent: QSplitter, heading: str, caption: str
@@ -471,7 +487,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "音声デバイス", "利用する音声デバイスを選択してください。")
             return
         if translation_enabled and (backend == "local" or translation_target == "server"):
-            ollama_model = self.ollama_model_edit.text().strip() or DEFAULT_OLLAMA_MODEL
+            ollama_model = self._selected_ollama_model()
             if translation_target == "server":
                 ollama_ready, ollama_error = check_translation_server(
                     self.translation_server_host_edit.text(),
@@ -522,7 +538,7 @@ class MainWindow(QMainWindow):
                 language=self.language_combo.currentData(),
                 translation_enabled=translation_enabled,
                 translation_target="server" if translation_target == "server" else "openai",
-                ollama_model=self.ollama_model_edit.text().strip() or DEFAULT_OLLAMA_MODEL,
+                ollama_model=self._selected_ollama_model(),
                 translation_server_host=self.translation_server_host_edit.text().strip(),
                 translation_server_port=self.translation_server_port_spin.value(),
                 **callbacks,
@@ -532,7 +548,7 @@ class MainWindow(QMainWindow):
                 language=self.language_combo.currentData(),
                 translation_enabled=translation_enabled,
                 whisper_model=performance.model,
-                ollama_model=self.ollama_model_edit.text().strip() or DEFAULT_OLLAMA_MODEL,
+                ollama_model=self._selected_ollama_model(),
                 local_engine=performance.engine,
                 whisperkit_compute_profile=performance.compute_profile,
                 translation_target=translation_target,
@@ -621,7 +637,6 @@ class MainWindow(QMainWindow):
             custom_engine=str(self.local_engine_combo.currentData()),
             custom_compute_profile=str(self.compute_profile_combo.currentData()),
         )
-        custom_performance = self.performance_profile_combo.currentData() == "custom"
         self.translation_target_combo.setItemText(
             0, "OpenAI（クラウド）" if is_openai else "このPC（Ollama）"
         )
@@ -631,15 +646,18 @@ class MainWindow(QMainWindow):
         self.local_model_combo.setVisible(not is_openai)
         self.local_engine_label.setVisible(not is_openai)
         self.local_engine_combo.setVisible(not is_openai)
-        show_m4_options = not is_openai and self.apple_chip.startswith("Apple M4")
-        self.performance_profile_label.setVisible(show_m4_options)
-        self.performance_profile_combo.setVisible(show_m4_options)
-        self.compute_profile_label.setVisible(not is_openai and performance.engine == "whisperkit")
-        self.compute_profile_combo.setVisible(not is_openai and performance.engine == "whisperkit")
+        show_mac_options = not is_openai and self.is_apple_silicon
+        self.performance_profile_label.setVisible(show_mac_options)
+        self.performance_profile_combo.setVisible(show_mac_options)
+        show_core_ml_options = (
+            not is_openai and self.is_apple_silicon and performance.engine == "whisperkit"
+        )
+        self.compute_profile_label.setVisible(show_core_ml_options)
+        self.compute_profile_combo.setVisible(show_core_ml_options)
         if not self.running:
-            self.local_model_combo.setEnabled(custom_performance)
-            self.local_engine_combo.setEnabled(custom_performance)
-            self.compute_profile_combo.setEnabled(custom_performance)
+            self.local_model_combo.setEnabled(not is_openai)
+            self.local_engine_combo.setEnabled(not is_openai)
+            self.compute_profile_combo.setEnabled(not is_openai)
         show_ollama_model = translation_enabled and (
             not is_openai or uses_translation_server
         )
@@ -668,7 +686,7 @@ class MainWindow(QMainWindow):
                     f"{self.translation_server_port_spin.value()}"
                 )
                 self.translation_caption.setText(
-                    f"別PC翻訳 · {server} · Ollama {self.ollama_model_edit.text()}"
+                    f"別PC翻訳 · {server} · Ollama {self._selected_ollama_model()}"
                 )
             else:
                 self.translation_caption.setText(f"高品質翻訳 · {TRANSLATION_MODEL}")
@@ -684,12 +702,15 @@ class MainWindow(QMainWindow):
                     f"{self.translation_server_port_spin.value()}"
                 )
                 self.translation_caption.setText(
-                    f"別PC翻訳 · {server} · Ollama {self.ollama_model_edit.text()}"
+                    f"別PC翻訳 · {server} · Ollama {self._selected_ollama_model()}"
                 )
             else:
                 self.translation_caption.setText(
-                    f"完全ローカル翻訳 · Ollama {self.ollama_model_edit.text()}"
+                    f"完全ローカル翻訳 · Ollama {self._selected_ollama_model()}"
                 )
+
+    def _selected_ollama_model(self) -> str:
+        return str(self.ollama_model_edit.currentData() or self.ollama_model_edit.currentText()).strip() or DEFAULT_OLLAMA_MODEL
 
     def _append_transcript(self, segment: TranscriptSegment) -> None:
         self._continues_by_sequence[segment.sequence] = segment.continues_previous

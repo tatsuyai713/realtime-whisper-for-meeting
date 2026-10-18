@@ -32,7 +32,13 @@ from .translation_protocol import (
 )
 
 DEFAULT_WHISPER_MODEL = "small"
-DEFAULT_OLLAMA_MODEL = "translategemma:12b"
+DEFAULT_OLLAMA_MODEL = "translategemma:4b"
+LOCAL_TRANSLATION_MODELS = (
+    ("高速・軽量 (TranslateGemma 4B)", "translategemma:4b"),
+    ("高精度 (TranslateGemma 12B)", "translategemma:12b"),
+    ("高速・汎用 (Qwen 2.5 3B)", "qwen2.5:3b"),
+    ("高精度・汎用 (Qwen 2.5 7B)", "qwen2.5:7b"),
+)
 OLLAMA_CHAT_URL = "http://127.0.0.1:11434/api/chat"
 WHISPERKIT_MODELS = {
     "tiny": "tiny",
@@ -73,10 +79,26 @@ def whisperkit_available() -> bool:
     return uses_mlx() and shutil.which("whisperkit-cli") is not None
 
 
+def cuda_available() -> bool:
+    """Return whether CTranslate2 can run faster-whisper on an NVIDIA CUDA GPU."""
+    try:
+        import ctranslate2
+
+        return "float16" in ctranslate2.get_supported_compute_types("cuda")
+    except (ImportError, RuntimeError):
+        return False
+
+
 def local_engine_label(engine: str = "auto") -> str:
     if engine == "whisperkit" or (engine == "auto" and whisperkit_available()):
         return "WhisperKit / Neural Engine"
-    return "MLX / Metal GPU" if uses_mlx() else "faster-whisper"
+    if engine == "mlx" or (engine == "auto" and uses_mlx()):
+        return "MLX / Metal GPU"
+    if engine == "cuda":
+        return "faster-whisper / NVIDIA CUDA"
+    if engine == "cpu":
+        return "faster-whisper / CPU"
+    return "faster-whisper / CUDA" if cuda_available() else "faster-whisper / CPU"
 
 
 def check_ollama(model: str) -> tuple[bool, str]:
@@ -204,7 +226,7 @@ class LocalProcessor:
         )
         if use_whisperkit:
             self._transcription_loop_whisperkit_supervised()
-        elif uses_mlx():
+        elif self.local_engine == "mlx" or (self.local_engine == "auto" and uses_mlx()):
             self._transcription_loop_mlx()
         else:
             self._transcription_loop_faster_whisper()
@@ -415,6 +437,12 @@ class LocalProcessor:
 
     def _transcription_loop_faster_whisper(self) -> None:
         try:
+            if self.local_engine == "cuda" and not cuda_available():
+                self.on_error(
+                    "NVIDIA CUDA GPUを利用できません。NVIDIAドライバーとCUDA対応の"
+                    "CTranslate2を確認するか、CPUまたは自動を選んでください。"
+                )
+                return
             self.on_status(f"ローカル音声モデル {self.whisper_model} を読み込み中…")
             try:
                 from faster_whisper import WhisperModel
@@ -426,7 +454,8 @@ class LocalProcessor:
                 return
 
             model_name = FASTER_WHISPER_MODELS.get(self.whisper_model, self.whisper_model)
-            model = WhisperModel(model_name, device="auto", compute_type="auto")
+            device, compute_type = self._faster_whisper_settings()
+            model = WhisperModel(model_name, device=device, compute_type=compute_type)
             self._set_idle_status()
             self.on_ready()
             while True:
@@ -464,6 +493,15 @@ class LocalProcessor:
         finally:
             if self.translation_enabled:
                 self.translation_queue.put(None)
+
+    def _faster_whisper_settings(self) -> tuple[str, str]:
+        if self.local_engine == "cuda":
+            return "cuda", "float16"
+        if self.local_engine == "cpu":
+            return "cpu", "int8"
+        if cuda_available():
+            return "cuda", "float16"
+        return "cpu", "int8"
 
     def _translation_loop(self) -> None:
         while True:

@@ -141,15 +141,15 @@ def test_resample_audio_to_whisper_rate() -> None:
     assert len(result) == 16_000
 
 
-def test_m4_profiles_use_optimized_whisperkit_models() -> None:
+def test_mac_profiles_use_optimized_whisperkit_models() -> None:
     fast = resolve_local_performance(
-        "m4-fast",
+        "mac-fast",
         custom_model="tiny",
         custom_engine="mlx",
         custom_compute_profile="gpu",
     )
     balanced = resolve_local_performance(
-        "m4-balanced",
+        "mac-balanced",
         custom_model="tiny",
         custom_engine="mlx",
         custom_compute_profile="gpu",
@@ -166,9 +166,42 @@ def test_m4_profiles_use_optimized_whisperkit_models() -> None:
     )
 
 
+def test_legacy_m4_profile_names_remain_supported() -> None:
+    legacy = resolve_local_performance(
+        "m4-fast",
+        custom_model="tiny",
+        custom_engine="mlx",
+        custom_compute_profile="gpu",
+    )
+    assert legacy == resolve_local_performance(
+        "mac-fast",
+        custom_model="tiny",
+        custom_engine="mlx",
+        custom_compute_profile="gpu",
+    )
+
+
 def test_realtime_speed_format() -> None:
     assert format_realtime_speed(5.0, 1.0) == "RTF 0.20（実時間の5.0倍速）"
     assert format_realtime_speed(0.0, 1.0) == ""
+
+
+def test_cuda_engine_uses_float16_and_cpu_uses_int8() -> None:
+    processor = LocalProcessor(
+        language="en",
+        translation_enabled=False,
+        whisper_model="small",
+        ollama_model="test-model",
+        local_engine="cuda",
+        audio_queue=queue.Queue(),
+        on_transcript=lambda _segment: None,
+        on_translation=lambda _sequence, _text: None,
+        on_status=lambda _text: None,
+        on_error=lambda _text: None,
+    )
+    assert processor._faster_whisper_settings() == ("cuda", "float16")
+    processor.local_engine = "cpu"
+    assert processor._faster_whisper_settings() == ("cpu", "int8")
 
 
 def test_repeated_words_from_audio_overlap_are_removed() -> None:
@@ -304,6 +337,14 @@ def test_display_splits_sentences_even_when_next_one_starts_lowercase() -> None:
         "It is a rally car for the road.",
         "of the cars I wanted to test.",
         "and then we drove it.",
+    ]
+
+
+def test_display_splits_japanese_sentences_without_spaces() -> None:
+    assert split_transcript_sentences("最初の文です。次の文です！最後の文です？") == [
+        "最初の文です。",
+        "次の文です！",
+        "最後の文です？",
     ]
 
 
